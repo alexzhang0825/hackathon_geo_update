@@ -300,6 +300,70 @@ body {
   flex-shrink: 0;
 }
 
+/* GPS inputs */
+.gps-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.gps-field {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.gps-label {
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 0.15em;
+}
+.gps-input {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 5px 7px;
+  outline: none;
+  width: 100%;
+}
+.gps-input:focus { border-color: var(--accent-cyan); }
+
+/* Image preview */
+.image-preview {
+  margin-top: 10px;
+  border: 1px solid var(--panel-border);
+  overflow: hidden;
+}
+.image-preview img {
+  width: 100%;
+  display: block;
+  max-height: 140px;
+  object-fit: cover;
+}
+.ai-result {
+  padding: 8px 10px;
+  border-top: 1px solid var(--panel-border);
+  background: rgba(0,0,0,0.3);
+}
+.ai-threat-type {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--danger);
+  margin-bottom: 4px;
+}
+.ai-desc {
+  font-size: 10px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin-bottom: 4px;
+}
+.ai-risk {
+  font-size: 10px;
+  color: var(--accent-orange);
+  letter-spacing: 0.1em;
+}
+
 /* Mapbox popup dark theme */
 .mapboxgl-popup-content {
   background: var(--panel) !important;

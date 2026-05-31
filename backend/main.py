@@ -1,19 +1,25 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import osmnx as ox
 import networkx as nx
 from shapely.geometry import shape, LineString
+from dotenv import load_dotenv
 import logging
+import os
+
+load_dotenv()
+from analyze import analyze as gemini_analyze
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Demo: San Francisco — Civic Center → Financial District
-START_LNG, START_LAT = -122.4194, 37.7749
-END_LNG,   END_LAT   = -122.4089, 37.7858
-CENTER = (37.7804, -122.4142)  # (lat, lng) midpoint
+# Demo: Vancouver — Marpole → Olympic Village
+# Route passes through real GPS photo location (49.2628, -123.1300)
+START_LNG, START_LAT = -123.1380, 49.2520   # Marpole / south Vancouver
+END_LNG,   END_LAT   = -123.1050, 49.2750   # Olympic Village / False Creek
+CENTER = (49.2635, -123.1215)               # centered on real photo GPS
 
 G = None
 start_node = None
@@ -23,14 +29,12 @@ end_node = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global G, start_node, end_node
-    logger.info("Loading OSM graph for San Francisco…")
+    logger.info("Loading OSM graph for Vancouver…")
     try:
-        # graph_from_point(center_lat_lng, dist_meters) — stable across osmnx 1.x and 2.x
-        G = ox.graph_from_point(CENTER, dist=1600, network_type="drive")
+        G = ox.graph_from_point(CENTER, dist=1800, network_type="drive")
         start_node = ox.nearest_nodes(G, X=START_LNG, Y=START_LAT)
         end_node   = ox.nearest_nodes(G, X=END_LNG,   Y=END_LAT)
         logger.info(f"Graph loaded: {len(G.nodes)} nodes, {len(G.edges)} edges")
-        logger.info(f"Start={start_node}  End={end_node}")
     except Exception as e:
         logger.error(f"Graph load failed: {e}")
     yield
@@ -46,12 +50,8 @@ app.add_middleware(
 )
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
-
 def nodes_to_coords(graph, path):
-    """Return [[lng, lat], …] GeoJSON coords from a node-id path."""
     return [[graph.nodes[n]["x"], graph.nodes[n]["y"]] for n in path]
-
 
 def route_length_m(graph, path):
     total = 0.0
@@ -60,9 +60,7 @@ def route_length_m(graph, path):
         total += min(d.get("length", 0) for d in edges.values())
     return round(total, 1)
 
-
 def blocked_edges(graph, poly_shape):
-    """Find graph edges that intersect the obstacle polygon."""
     result = []
     for u, v, key, data in graph.edges(keys=True, data=True):
         geom = data.get("geometry") or LineString([
@@ -73,8 +71,6 @@ def blocked_edges(graph, poly_shape):
             result.append((u, v, key))
     return result
 
-
-# ── schemas ───────────────────────────────────────────────────────────────────
 
 class Geometry(BaseModel):
     type: str
@@ -89,11 +85,21 @@ class RouteRequest(BaseModel):
     obstacle: Feature
 
 
-# ── endpoints ─────────────────────────────────────────────────────────────────
-
 @app.get("/health")
 async def health():
     return {"status": "ok", "graph_loaded": G is not None}
+
+
+@app.post("/api/analyze-image")
+async def analyze_image(
+    image: UploadFile = File(...),
+    gps_lat: float = Form(49.2792),
+    gps_lng: float = Form(-123.1087),
+):
+    image_bytes = await image.read()
+    result = gemini_analyze(image_bytes, gps_lat, gps_lng)
+    logger.info(f"AI analysis: threat={result.get('threat_detected')} risk={result.get('risk_level')}")
+    return result
 
 
 @app.get("/api/baseline")
@@ -129,7 +135,6 @@ async def get_routes(req: RouteRequest):
 
         routes = []
 
-        # ── Route 1: shortest path ────────────────────────────────────────────
         try:
             p1 = nx.shortest_path(G2, start_node, end_node, weight="length")
             routes.append({
@@ -140,7 +145,6 @@ async def get_routes(req: RouteRequest):
         except nx.NetworkXNoPath:
             routes.append(FALLBACK_ROUTES[0])
 
-        # ── Route 2: penalised path (diverges from route 1) ───────────────────
         try:
             G3 = G2.copy()
             p1_ref = nx.shortest_path(G3, start_node, end_node, weight="length")
@@ -163,7 +167,6 @@ async def get_routes(req: RouteRequest):
         except nx.NetworkXNoPath:
             routes.append(FALLBACK_ROUTES[1])
 
-        # guarantee exactly 2
         while len(routes) < 2:
             routes.append(FALLBACK_ROUTES[len(routes)])
 
@@ -174,18 +177,16 @@ async def get_routes(req: RouteRequest):
         return {"routes": FALLBACK_ROUTES}
 
 
-# ── fallback data (demo reliability) ──────────────────────────────────────────
-
 FALLBACK_BASELINE = {
     "type": "Feature",
     "geometry": {
         "type": "LineString",
         "coordinates": [
-            [-122.4194, 37.7749], [-122.4175, 37.7762], [-122.4155, 37.7778],
-            [-122.4135, 37.7800], [-122.4110, 37.7830], [-122.4089, 37.7858]
+            [-123.1380, 49.2520], [-123.1340, 49.2555], [-123.1300, 49.2628],
+            [-123.1220, 49.2670], [-123.1130, 49.2710], [-123.1050, 49.2750]
         ]
     },
-    "properties": {"length_m": 1380.0}
+    "properties": {"length_m": 2600.0}
 }
 
 FALLBACK_ROUTES = [
@@ -194,21 +195,21 @@ FALLBACK_ROUTES = [
         "geometry": {
             "type": "LineString",
             "coordinates": [
-                [-122.4194, 37.7749], [-122.4215, 37.7765], [-122.4202, 37.7808],
-                [-122.4155, 37.7843], [-122.4110, 37.7858], [-122.4089, 37.7858]
+                [-123.1380, 49.2520], [-123.1360, 49.2540], [-123.1350, 49.2600],
+                [-123.1240, 49.2680], [-123.1130, 49.2720], [-123.1050, 49.2750]
             ]
         },
-        "length_m": 1520.0
+        "length_m": 2750.0
     },
     {
         "id": "route-2", "label": "BRAVO ROUTE",
         "geometry": {
             "type": "LineString",
             "coordinates": [
-                [-122.4194, 37.7749], [-122.4170, 37.7738], [-122.4128, 37.7748],
-                [-122.4097, 37.7792], [-122.4089, 37.7858]
+                [-123.1380, 49.2520], [-123.1400, 49.2580], [-123.1350, 49.2650],
+                [-123.1200, 49.2700], [-123.1050, 49.2750]
             ]
         },
-        "length_m": 1820.0
+        "length_m": 3050.0
     }
 ]

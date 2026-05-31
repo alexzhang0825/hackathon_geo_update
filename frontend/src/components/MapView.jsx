@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 
-const START = [-122.4194, 37.7749]
-const END   = [-122.4089, 37.7858]
-const CENTER = [-122.4142, 37.7804]
+const START  = [-123.1380, 49.2520]   // Marpole
+const END    = [-123.1050, 49.2750]   // Olympic Village
+const CENTER = [-123.1215, 49.2635]   // centered on real photo GPS
 
 const ROUTE_COLORS = { 'route-1': '#00e5ff', 'route-2': '#ff9800' }
 
@@ -51,10 +51,9 @@ export default function MapView({ obstacleVisible, obstacle, routes, mapboxToken
     map.addControl(new mapboxgl.NavigationControl(), 'top-left')
 
     map.on('load', async () => {
-      // Baseline route
       let baselineCoords = [
-        [-122.4194, 37.7749], [-122.4175, 37.7762], [-122.4155, 37.7778],
-        [-122.4135, 37.7800], [-122.4110, 37.7830], [-122.4089, 37.7858]
+        [-123.1380, 49.2520], [-123.1340, 49.2555], [-123.1300, 49.2628],
+        [-123.1220, 49.2670], [-123.1130, 49.2710], [-123.1050, 49.2750]
       ]
       try {
         const res = await fetch('http://localhost:8000/api/baseline',
@@ -63,7 +62,7 @@ export default function MapView({ obstacleVisible, obstacle, routes, mapboxToken
         if (data.route?.geometry?.coordinates?.length) {
           baselineCoords = data.route.geometry.coordinates
         }
-      } catch { /* use fallback */ }
+      } catch { /* use fallback coords */ }
 
       map.addSource('baseline', {
         type: 'geojson',
@@ -74,7 +73,6 @@ export default function MapView({ obstacleVisible, obstacle, routes, mapboxToken
         paint: { 'line-color': '#888888', 'line-width': 3, 'line-dasharray': [3, 2], 'line-opacity': 0.9 }
       })
 
-      // Obstacle
       map.addSource('obstacle', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
       map.addLayer({
         id: 'obstacle-fill', type: 'fill', source: 'obstacle',
@@ -85,7 +83,6 @@ export default function MapView({ obstacleVisible, obstacle, routes, mapboxToken
         paint: { 'line-color': '#f44336', 'line-width': 2.5 }
       })
 
-      // Route layers
       for (const id of ['route-1', 'route-2']) {
         map.addSource(id, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
         map.addLayer({
@@ -102,7 +99,6 @@ export default function MapView({ obstacleVisible, obstacle, routes, mapboxToken
     })
   }, [mapboxToken])
 
-  // Update obstacle
   useEffect(() => {
     if (!mapReady || !mapRef.current) return
     const map = mapRef.current
@@ -114,7 +110,6 @@ export default function MapView({ obstacleVisible, obstacle, routes, mapboxToken
     }
   }, [obstacleVisible, obstacle, mapReady])
 
-  // Update routes
   useEffect(() => {
     if (!mapReady || !mapRef.current) return
     const map = mapRef.current
@@ -122,8 +117,7 @@ export default function MapView({ obstacleVisible, obstacle, routes, mapboxToken
       const route = routes.find(r => r.id === id)
       if (!route) continue
       map.getSource(id)?.setData({ type: 'Feature', geometry: route.geometry, properties: {} })
-      const op = route.visible ? 0.9 : 0
-      map.setPaintProperty(`${id}-line`, 'line-opacity', op)
+      map.setPaintProperty(`${id}-line`, 'line-opacity', route.visible ? 0.9 : 0)
       map.setPaintProperty(`${id}-glow`, 'line-opacity', route.visible ? 0.25 : 0)
     }
   }, [routes, mapReady])
