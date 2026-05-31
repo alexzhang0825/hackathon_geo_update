@@ -114,43 +114,16 @@ async def get_route(req: RouteRequest):
             G2.remove_edges_from(removed)
             logger.info(f"Blocked {len(removed)} edges from {len(req.obstacles)} obstacle(s)")
 
-        routes = []
-
         # ── shortest path ─────────────────────────────────────────────────────
         try:
             p1 = nx.shortest_path(G2, s_node, e_node, weight="length")
-            routes.append({
-                "id": "route-1", "label": "ALPHA ROUTE",
+            return {"routes": [{
+                "id": "route-1", "label": "ROUTE",
                 "geometry": {"type": "LineString", "coordinates": nodes_to_coords(G2, p1)},
                 "length_m": route_length_m(G2, p1),
-            })
+            }]}
         except nx.NetworkXNoPath:
-            routes.append(FALLBACK_ROUTES[0])
-
-        # ── alternative path (penalise route-1 edges) ────────────────────────
-        try:
-            G3    = G2.copy()
-            p1ref = nx.shortest_path(G3, s_node, e_node, weight="length")
-            for u, v in zip(p1ref, p1ref[1:]):
-                if G3.has_edge(u, v):
-                    for k in G3[u][v]:
-                        G3[u][v][k]["length"] = G3[u][v][k].get("length", 1) * 4
-            p2 = nx.shortest_path(G3, s_node, e_node, weight="length")
-            if p2 == p1ref:
-                for u, v in zip(p1ref, p1ref[1:]):
-                    if G3.has_edge(u, v):
-                        for k in G3[u][v]:
-                            G3[u][v][k]["length"] = G3[u][v][k].get("length", 1) * 10
-                p2 = nx.shortest_path(G3, s_node, e_node, weight="length")
-            routes.append({
-                "id": "route-2", "label": "BRAVO ROUTE",
-                "geometry": {"type": "LineString", "coordinates": nodes_to_coords(G2, p2)},
-                "length_m": route_length_m(G2, p2),
-            })
-        except nx.NetworkXNoPath:
-            routes.append(FALLBACK_ROUTES[1])
-
-        return {"routes": routes[:2]}
+            return {"routes": FALLBACK_ROUTES}
 
     except Exception as e:
         logger.error(f"Route error: {e}")
@@ -173,19 +146,11 @@ async def analyze_image(
 
 FALLBACK_ROUTES = [
     {
-        "id": "route-1", "label": "ALPHA ROUTE",
+        "id": "route-1", "label": "ROUTE",
         "geometry": {"type": "LineString", "coordinates": [
             [-123.1380, 49.2520], [-123.1360, 49.2540], [-123.1350, 49.2600],
             [-123.1240, 49.2680], [-123.1130, 49.2720], [-123.1050, 49.2750],
         ]},
         "length_m": 2750.0,
-    },
-    {
-        "id": "route-2", "label": "BRAVO ROUTE",
-        "geometry": {"type": "LineString", "coordinates": [
-            [-123.1380, 49.2520], [-123.1400, 49.2580], [-123.1350, 49.2650],
-            [-123.1200, 49.2700], [-123.1050, 49.2750],
-        ]},
-        "length_m": 3050.0,
     },
 ]

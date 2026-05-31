@@ -216,8 +216,7 @@ export default function ControlPanel({
 
       <div className="panel-footer">
         {[
-          ['#00e5ff', 'Alpha route (shortest)'],
-          ['#ff9800', 'Bravo route (alternative)'],
+          ['#00e5ff', 'Route (remaining)'],
           ['#f44336', 'Threat zone'],
         ].map(([color, label]) => (
           <div key={label} className="legend-row">

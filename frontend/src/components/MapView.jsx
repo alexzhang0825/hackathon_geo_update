@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 
-const CENTER            = [-123.1215, 49.2635]
-const ROUTE_COLORS      = { 'route-1': '#00e5ff', 'route-2': '#ff9800' }
-const SIMULATION_SECS   = 40   // seconds to traverse full route
+const CENTER           = [-123.1215, 49.2635]
+const ROUTE_COLOR      = '#00e5ff'
+const SIMULATION_SECS  = 40   // seconds to traverse full route
 const WIGGLE_AMPLITUDE  = 0.00008  // degrees lateral offset
 const WIGGLE_FREQUENCY  = 1.8      // oscillations per second
 
@@ -46,6 +46,22 @@ function directionAt(coords, dist) {
   }
   const n = coords.length
   return [coords[n - 1][0] - coords[n - 2][0], coords[n - 1][1] - coords[n - 2][1]]
+}
+
+/** Coords from troop's current position to the end of the route (trim-path effect). */
+function remainingCoords(coords, distTraveled) {
+  let cum = 0
+  for (let i = 1; i < coords.length; i++) {
+    const sl = segLen(coords[i - 1], coords[i])
+    if (cum + sl >= distTraveled) {
+      const t  = (distTraveled - cum) / sl
+      const px = coords[i - 1][0] + t * (coords[i][0] - coords[i - 1][0])
+      const py = coords[i - 1][1] + t * (coords[i][1] - coords[i - 1][1])
+      return [[px, py], ...coords.slice(i)]
+    }
+    cum += sl
+  }
+  return [coords[coords.length - 1], coords[coords.length - 1]]
 }
 
 function nearestDist(coords, point) {
@@ -107,11 +123,9 @@ export default function MapView({
       map.addLayer({ id: 'threats-fill',    type: 'fill', source: 'threats', paint: { 'fill-color': '#f44336', 'fill-opacity': 0.35 } })
       map.addLayer({ id: 'threats-outline', type: 'line', source: 'threats', paint: { 'line-color': '#f44336', 'line-width': 2.5 } })
 
-      for (const id of ['route-1', 'route-2']) {
-        map.addSource(id, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
-        map.addLayer({ id: `${id}-glow`, type: 'line', source: id, paint: { 'line-color': ROUTE_COLORS[id], 'line-width': 14, 'line-opacity': 0, 'line-blur': 8 } })
-        map.addLayer({ id: `${id}-line`, type: 'line', source: id, paint: { 'line-color': ROUTE_COLORS[id], 'line-width': 5,  'line-opacity': 0 } })
-      }
+      map.addSource('route-1', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
+      map.addLayer({ id: 'route-1-glow', type: 'line', source: 'route-1', paint: { 'line-color': ROUTE_COLOR, 'line-width': 14, 'line-opacity': 0, 'line-blur': 8 } })
+      map.addLayer({ id: 'route-1-line', type: 'line', source: 'route-1', paint: { 'line-color': ROUTE_COLOR, 'line-width': 5,  'line-opacity': 0 } })
       setMapReady(true)
     })
   }, [mapboxToken])
@@ -153,16 +167,14 @@ export default function MapView({
 
   useEffect(() => {
     if (!mapReady) return
-    const map = mapRef.current
-    for (const id of ['route-1', 'route-2']) {
-      const route = routes.find(r => r.id === id)
-      map.getSource(id)?.setData(route
-        ? { type: 'Feature', geometry: route.geometry, properties: {} }
-        : { type: 'FeatureCollection', features: [] }
-      )
-      map.setPaintProperty(`${id}-line`, 'line-opacity', route ? 0.9 : 0)
-      map.setPaintProperty(`${id}-glow`, 'line-opacity', route ? 0.25 : 0)
-    }
+    const route = routes[0]
+    const map   = mapRef.current
+    map.getSource('route-1')?.setData(route
+      ? { type: 'Feature', geometry: route.geometry, properties: {} }
+      : { type: 'FeatureCollection', features: [] }
+    )
+    map.setPaintProperty('route-1-line', 'line-opacity', route ? 0.9 : 0)
+    map.setPaintProperty('route-1-glow', 'line-opacity', route ? 0.25 : 0)
   }, [routes, mapReady])
 
   // ── simulation: reroute when routes change mid-run ────────────────────────
@@ -240,16 +252,28 @@ export default function MapView({
         if (troopPosRef) troopPosRef.current = pos
 
         // Wiggle: sinusoidal offset perpendicular to direction of travel
-        const dir = directionAt(sim.coords, sim.dist)
+        const dir    = directionAt(sim.coords, sim.dist)
         const dirLen = Math.sqrt(dir[0] ** 2 + dir[1] ** 2) || 1
-        const perp = [-dir[1] / dirLen, dir[0] / dirLen]
+        const perp   = [-dir[1] / dirLen, dir[0] / dirLen]
         const wiggle = WIGGLE_AMPLITUDE * Math.sin(sim.elapsed * WIGGLE_FREQUENCY * Math.PI * 2)
         const wiggledPos = [pos[0] + perp[0] * wiggle, pos[1] + perp[1] * wiggle]
 
         unitMarkerRef.current?.setLngLat(wiggledPos)
 
+        // Trim-path: update the route line to show only the remaining ahead of the troop
+        const rem = remainingCoords(sim.coords, sim.dist)
+        if (rem.length >= 2 && mapRef.current) {
+          mapRef.current.getSource('route-1')?.setData({
+            type: 'Feature',
+            geometry: { type: 'LineString', coordinates: rem },
+            properties: {},
+          })
+        }
+
         if (sim.dist >= sim.totalLen) {
           sim.active = false
+          // Clear the route line when the unit reaches the destination
+          mapRef.current?.getSource('route-1')?.setData({ type: 'FeatureCollection', features: [] })
           onSimulationEnd?.()
           return
         }
@@ -259,11 +283,17 @@ export default function MapView({
       rafRef.current = requestAnimationFrame(animate)
 
     } else {
-      // Stop
+      // Stop — restore full route line
       simRef.current.active = false
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
       unitMarkerRef.current?.remove()
       unitMarkerRef.current = null
+      const route = routesRef.current[0]
+      if (route && mapRef.current) {
+        mapRef.current.getSource('route-1')?.setData({
+          type: 'Feature', geometry: route.geometry, properties: {},
+        })
+      }
     }
 
     return () => {

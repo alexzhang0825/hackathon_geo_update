@@ -9,20 +9,12 @@ const DEFAULT_END   = [-123.1050, 49.2750]
 
 const FALLBACK_ROUTES = [
   {
-    id: 'route-1', label: 'ALPHA ROUTE',
+    id: 'route-1', label: 'ROUTE',
     geometry: { type: 'LineString', coordinates: [
       [-123.1380, 49.2520], [-123.1360, 49.2540], [-123.1350, 49.2600],
       [-123.1240, 49.2680], [-123.1130, 49.2720], [-123.1050, 49.2750],
     ]},
     length_m: 2750,
-  },
-  {
-    id: 'route-2', label: 'BRAVO ROUTE',
-    geometry: { type: 'LineString', coordinates: [
-      [-123.1380, 49.2520], [-123.1400, 49.2580], [-123.1350, 49.2650],
-      [-123.1200, 49.2700], [-123.1050, 49.2750],
-    ]},
-    length_m: 3050,
   },
 ]
 
