@@ -70,7 +70,7 @@ function nearestDist(coords, point) {
 
 export default function MapView({
   startPoint, endPoint, placingMarker, onMapClick,
-  threats, routes, simulating, onSimulationEnd, mapboxToken,
+  threats, routes, simulating, onSimulationEnd, troopPosRef, mapboxToken,
 }) {
   const containerRef   = useRef(null)
   const mapRef         = useRef(null)
@@ -235,8 +235,9 @@ export default function MapView({
         const speed = sim.totalLen / SIMULATION_SECS
         sim.dist = Math.min(sim.dist + speed * dt, sim.totalLen)
 
-        // Base position
+        // Base position (road-snapped — used for rerouting calculations)
         const pos = pointAtDist(sim.coords, sim.dist)
+        if (troopPosRef) troopPosRef.current = pos
 
         // Wiggle: sinusoidal offset perpendicular to direction of travel
         const dir = directionAt(sim.coords, sim.dist)

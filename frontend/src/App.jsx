@@ -60,15 +60,27 @@ export default function App() {
   const [analyzing,     setAnalyzing]     = useState(false)
   const [simulating,    setSimulating]    = useState(false)
 
-  const placingRef = useRef(null)
+  const placingRef    = useRef(null)
+  const simulatingRef = useRef(false)  // mirror for doFetch (avoids stale closure)
+  const troopPosRef   = useRef(null)   // updated every animation frame by MapView
+
+  useEffect(() => { simulatingRef.current = simulating }, [simulating])
 
   const setPlacing = (mode) => {
     setPlacingMarker(mode)
     placingRef.current = mode
   }
 
-  const doFetch = (start, end, threatList) =>
-    fetchRoutesFromAPI(start, end, threatList, setRoutes, setLoading)
+  // When the simulation is running, route FROM the troop's current position,
+  // not from the original Point A — so the new path follows real roads from
+  // wherever the unit actually is.
+  const doFetch = (start, end, threatList) => {
+    const effectiveStart =
+      simulatingRef.current && troopPosRef.current
+        ? troopPosRef.current
+        : start
+    fetchRoutesFromAPI(effectiveStart, end, threatList, setRoutes, setLoading)
+  }
 
   useEffect(() => { doFetch(DEFAULT_START, DEFAULT_END, []) }, [])
 
@@ -171,6 +183,7 @@ export default function App() {
           routes={routes}
           simulating={simulating}
           onSimulationEnd={handleSimulationEnd}
+          troopPosRef={troopPosRef}
           mapboxToken={MAPBOX_TOKEN}
         />
         <ControlPanel
