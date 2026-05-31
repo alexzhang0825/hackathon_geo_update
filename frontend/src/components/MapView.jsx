@@ -170,15 +170,37 @@ export default function MapView({
     if (!simRef.current.active) return
     const route = routesRef.current.find(r => r.id === 'route-1') || routesRef.current[0]
     if (!route) return
-    const coords   = route.geometry.coordinates
-    const totalLen = routeTotalLen(coords)
-    // Find where the unit currently is on the new route
+
+    const newCoords  = route.geometry.coordinates
     const currentPos = unitMarkerRef.current?.getLngLat()
-    if (currentPos) {
-      simRef.current.dist = nearestDist(coords, [currentPos.lng, currentPos.lat])
+    if (!currentPos) return
+
+    const here = [currentPos.lng, currentPos.lat]
+
+    // Find where on the new route the unit should converge to
+    const nd = nearestDist(newCoords, here)
+
+    // Build transition path: unit's exact current position + remainder of new route
+    // so the unit smoothly drives toward the new road rather than teleporting.
+    const transition = [here]
+    let cumD = 0
+    for (let i = 1; i < newCoords.length; i++) {
+      const sl = segLen(newCoords[i - 1], newCoords[i])
+      if (cumD + sl >= nd) {
+        // Insert the precise join-point on the segment, then the rest of the route
+        const t  = (nd - cumD) / sl
+        const jx = newCoords[i - 1][0] + t * (newCoords[i][0] - newCoords[i - 1][0])
+        const jy = newCoords[i - 1][1] + t * (newCoords[i][1] - newCoords[i - 1][1])
+        transition.push([jx, jy], ...newCoords.slice(i))
+        break
+      }
+      cumD += sl
     }
-    simRef.current.coords   = coords
-    simRef.current.totalLen = totalLen
+    if (transition.length === 1) transition.push(...newCoords) // fallback
+
+    simRef.current.coords   = transition
+    simRef.current.totalLen = routeTotalLen(transition)
+    simRef.current.dist     = 0  // unit starts at transition[0] = its current position
   }, [routes])
 
   // ── simulation: start / stop ───────────────────────────────────────────────
