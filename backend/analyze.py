@@ -1,24 +1,24 @@
 """
 Gemini Vision image analysis for tactical threat detection.
-Called by /api/analyze-image in main.py
+Uses the current google-genai SDK (google.generativeai is deprecated).
 """
 import os
 import math
 import base64
 import json
 import re
-import google.generativeai as genai
-from PIL import Image
 import io
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+from google import genai
+from google.genai import types
+from PIL import Image
 
-# Assumed drone parameters for geo-projection
-DRONE_ALTITUDE_M = 150
-CAMERA_FOV_DEG   = 80   # typical drone camera horizontal FOV
+GEMINI_API_KEY    = os.getenv("GEMINI_API_KEY", "")
+DRONE_ALTITUDE_M  = 150
+CAMERA_FOV_DEG    = 80
+
 
 def _coverage_deg(lat: float):
-    """Return (dlat, dlng) half-coverage in degrees for assumed altitude."""
     half_width_m = DRONE_ALTITUDE_M * math.tan(math.radians(CAMERA_FOV_DEG / 2))
     dlat = half_width_m / 111_000
     dlng = half_width_m / (111_000 * math.cos(math.radians(lat)))
@@ -26,32 +26,28 @@ def _coverage_deg(lat: float):
 
 
 def _threat_box_to_geojson(x_min, y_min, x_max, y_max, center_lat, center_lng):
-    """
-    Convert normalised image coordinates (0-1) to a GeoJSON Polygon.
-    Image origin is top-left: x → east, y → south.
-    """
+    """Convert normalised image coords (0-1) to a GeoJSON Polygon."""
     dlat, dlng = _coverage_deg(center_lat)
-
-    west  = center_lng - dlng
-    east  = center_lng + dlng
-    north = center_lat + dlat
-    south = center_lat - dlat
+    west, east   = center_lng - dlng, center_lng + dlng
+    north, south = center_lat + dlat, center_lat - dlat
 
     obs_west  = west  + x_min * (east - west)
     obs_east  = west  + x_max * (east - west)
     obs_north = north - y_min * (north - south)
     obs_south = north - y_max * (north - south)
 
-    coords = [[
-        [obs_west,  obs_north],
-        [obs_east,  obs_north],
-        [obs_east,  obs_south],
-        [obs_west,  obs_south],
-        [obs_west,  obs_north],
-    ]]
     return {
         "type": "Feature",
-        "geometry": {"type": "Polygon", "coordinates": coords},
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[
+                [obs_west,  obs_north],
+                [obs_east,  obs_north],
+                [obs_east,  obs_south],
+                [obs_west,  obs_south],
+                [obs_west,  obs_north],
+            ]]
+        },
         "properties": {"kind": "ai_detected_threat"}
     }
 
@@ -81,28 +77,27 @@ If no threat is detected set threat_detected to false and risk_level to 1."""
 
 
 def analyze(image_bytes: bytes, center_lat: float, center_lng: float) -> dict:
-    """Run Gemini Vision analysis and return structured result with GeoJSON."""
     if not GEMINI_API_KEY:
         return _fallback("No Gemini API key configured", center_lat, center_lng)
 
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-1.5-flash")
+        client = genai.Client(api_key=GEMINI_API_KEY)
 
         img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        # Resize to reduce token cost while keeping detail
         img.thumbnail((1024, 1024))
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=85)
         img_bytes = buf.getvalue()
 
-        response = model.generate_content([
-            PROMPT,
-            {"mime_type": "image/jpeg", "data": base64.b64encode(img_bytes).decode()}
-        ])
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=[
+                types.Part.from_text(text=PROMPT),
+                types.Part.from_bytes(data=img_bytes, mime_type="image/jpeg"),
+            ],
+        )
 
         raw = response.text.strip()
-        # Strip markdown fences if present
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
 
@@ -112,14 +107,13 @@ def analyze(image_bytes: bytes, center_lat: float, center_lng: float) -> dict:
             tz = data["threat_zone"]
             data["obstacle_geojson"] = _threat_box_to_geojson(
                 tz["x_min"], tz["y_min"], tz["x_max"], tz["y_max"],
-                center_lat, center_lng
+                center_lat, center_lng,
             )
 
         return data
 
     except json.JSONDecodeError:
-        # Gemini returned text — extract meaning and use default zone
-        desc = response.text[:300] if 'response' in dir() else "Analysis incomplete"
+        desc = response.text[:300] if "response" in dir() else "Analysis incomplete"
         return _fallback(desc, center_lat, center_lng, threat=True)
     except Exception as e:
         return _fallback(str(e), center_lat, center_lng)
