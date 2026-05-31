@@ -1,4 +1,4 @@
-"""
+﻿"""
 Claude Vision image analysis for tactical threat detection.
 """
 import os, math, base64, json, re, io
