@@ -1,23 +1,93 @@
 import { useEffect, useRef, useState } from 'react'
 
-const CENTER       = [-123.1215, 49.2635]
-const ROUTE_COLORS = { 'route-1': '#00e5ff', 'route-2': '#ff9800' }
+const CENTER            = [-123.1215, 49.2635]
+const ROUTE_COLORS      = { 'route-1': '#00e5ff', 'route-2': '#ff9800' }
+const SIMULATION_SECS   = 40   // seconds to traverse full route
+const WIGGLE_AMPLITUDE  = 0.00008  // degrees lateral offset
+const WIGGLE_FREQUENCY  = 1.8      // oscillations per second
+
+// ── geometry helpers ──────────────────────────────────────────────────────────
+
+function segLen(a, b) {
+  const dx = b[0] - a[0], dy = b[1] - a[1]
+  return Math.sqrt(dx * dx + dy * dy)
+}
+
+function routeTotalLen(coords) {
+  let len = 0
+  for (let i = 1; i < coords.length; i++) len += segLen(coords[i - 1], coords[i])
+  return len
+}
+
+function pointAtDist(coords, dist) {
+  let rem = dist
+  for (let i = 1; i < coords.length; i++) {
+    const sl = segLen(coords[i - 1], coords[i])
+    if (rem <= sl) {
+      const t = rem / sl
+      return [
+        coords[i - 1][0] + t * (coords[i][0] - coords[i - 1][0]),
+        coords[i - 1][1] + t * (coords[i][1] - coords[i - 1][1]),
+      ]
+    }
+    rem -= sl
+  }
+  return coords[coords.length - 1]
+}
+
+function directionAt(coords, dist) {
+  let rem = dist
+  for (let i = 1; i < coords.length; i++) {
+    const sl = segLen(coords[i - 1], coords[i])
+    if (rem <= sl) {
+      return [coords[i][0] - coords[i - 1][0], coords[i][1] - coords[i - 1][1]]
+    }
+    rem -= sl
+  }
+  const n = coords.length
+  return [coords[n - 1][0] - coords[n - 2][0], coords[n - 1][1] - coords[n - 2][1]]
+}
+
+function nearestDist(coords, point) {
+  let bestD2 = Infinity, bestCumD = 0, cumD = 0
+  for (let i = 1; i < coords.length; i++) {
+    const ax = coords[i - 1][0], ay = coords[i - 1][1]
+    const bx = coords[i][0],     by = coords[i][1]
+    const dx = bx - ax,          dy = by - ay
+    const sl = Math.sqrt(dx * dx + dy * dy)
+    const t  = sl > 0
+      ? Math.max(0, Math.min(1, ((point[0] - ax) * dx + (point[1] - ay) * dy) / (sl * sl)))
+      : 0
+    const px = ax + t * dx, py = ay + t * dy
+    const d2 = (point[0] - px) ** 2 + (point[1] - py) ** 2
+    if (d2 < bestD2) { bestD2 = d2; bestCumD = cumD + t * sl }
+    cumD += sl
+  }
+  return bestCumD
+}
+
+// ── component ─────────────────────────────────────────────────────────────────
 
 export default function MapView({
   startPoint, endPoint, placingMarker, onMapClick,
-  threats, routes, mapboxToken,
+  threats, routes, simulating, onSimulationEnd, mapboxToken,
 }) {
   const containerRef   = useRef(null)
   const mapRef         = useRef(null)
   const startMarkerRef = useRef(null)
   const endMarkerRef   = useRef(null)
+  const unitMarkerRef  = useRef(null)
   const onMapClickRef  = useRef(onMapClick)
+  const rafRef         = useRef(null)
+  const animRef        = useRef(null)   // holds the animate fn so it can self-reference
+  const routesRef      = useRef(routes) // stable ref so animation reads latest routes
+  const simRef         = useRef({ active: false, dist: 0, totalLen: 0, coords: null, lastTime: null, elapsed: 0 })
   const [mapReady, setMapReady] = useState(false)
 
-  // Keep click handler ref current without re-registering the listener
   useEffect(() => { onMapClickRef.current = onMapClick }, [onMapClick])
+  useEffect(() => { routesRef.current = routes },         [routes])
 
-  // ── initialise map ────────────────────────────────────────────────────────
+  // ── init map ───────────────────────────────────────────────────────────────
   useEffect(() => {
     if (mapRef.current || !window.mapboxgl) return
     const mapboxgl = window.mapboxgl
@@ -26,104 +96,157 @@ export default function MapView({
     const map = new mapboxgl.Map({
       container: containerRef.current,
       style: 'mapbox://styles/mapbox/satellite-streets-v12',
-      center: CENTER,
-      zoom: 13,
-      pitch: 30,
+      center: CENTER, zoom: 13, pitch: 30,
     })
     mapRef.current = map
-
     map.addControl(new mapboxgl.NavigationControl(), 'top-left')
-
-    // Single stable click handler — reads current callback via ref
-    map.on('click', (e) => {
-      onMapClickRef.current([e.lngLat.lng, e.lngLat.lat])
-    })
+    map.on('click', (e) => onMapClickRef.current([e.lngLat.lng, e.lngLat.lat]))
 
     map.on('load', () => {
-      // Threat overlay
       map.addSource('threats', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
-      map.addLayer({
-        id: 'threats-fill', type: 'fill', source: 'threats',
-        paint: { 'fill-color': '#f44336', 'fill-opacity': 0.35 },
-      })
-      map.addLayer({
-        id: 'threats-outline', type: 'line', source: 'threats',
-        paint: { 'line-color': '#f44336', 'line-width': 2.5 },
-      })
+      map.addLayer({ id: 'threats-fill',    type: 'fill', source: 'threats', paint: { 'fill-color': '#f44336', 'fill-opacity': 0.35 } })
+      map.addLayer({ id: 'threats-outline', type: 'line', source: 'threats', paint: { 'line-color': '#f44336', 'line-width': 2.5 } })
 
-      // Route layers
       for (const id of ['route-1', 'route-2']) {
         map.addSource(id, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } })
-        map.addLayer({
-          id: `${id}-glow`, type: 'line', source: id,
-          paint: { 'line-color': ROUTE_COLORS[id], 'line-width': 14, 'line-opacity': 0, 'line-blur': 8 },
-        })
-        map.addLayer({
-          id: `${id}-line`, type: 'line', source: id,
-          paint: { 'line-color': ROUTE_COLORS[id], 'line-width': 5, 'line-opacity': 0 },
-        })
+        map.addLayer({ id: `${id}-glow`, type: 'line', source: id, paint: { 'line-color': ROUTE_COLORS[id], 'line-width': 14, 'line-opacity': 0, 'line-blur': 8 } })
+        map.addLayer({ id: `${id}-line`, type: 'line', source: id, paint: { 'line-color': ROUTE_COLORS[id], 'line-width': 5,  'line-opacity': 0 } })
       }
-
       setMapReady(true)
     })
   }, [mapboxToken])
 
-  // ── cursor: crosshair while placing ──────────────────────────────────────
+  // ── cursor ─────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!mapRef.current) return
     mapRef.current.getCanvas().style.cursor = placingMarker ? 'crosshair' : ''
   }, [placingMarker])
 
-  // ── A marker ─────────────────────────────────────────────────────────────
+  // ── A / B markers ──────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!mapReady || !mapRef.current) return
-    const mapboxgl = window.mapboxgl
+    if (!mapReady) return
     startMarkerRef.current?.remove()
     if (startPoint) {
-      const el = markerEl('A', '#00e5ff')
-      startMarkerRef.current = new mapboxgl.Marker({ element: el })
+      startMarkerRef.current = new window.mapboxgl.Marker({ element: markerEl('A', '#00e5ff') })
         .setLngLat(startPoint)
-        .setPopup(new mapboxgl.Popup({ offset: 20 }).setHTML('<b>POINT ALPHA</b><br>Unit origin'))
+        .setPopup(new window.mapboxgl.Popup({ offset: 20 }).setHTML('<b>POINT ALPHA</b><br>Unit origin'))
         .addTo(mapRef.current)
     }
   }, [startPoint, mapReady])
 
-  // ── B marker ─────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!mapReady || !mapRef.current) return
-    const mapboxgl = window.mapboxgl
+    if (!mapReady) return
     endMarkerRef.current?.remove()
     if (endPoint) {
-      const el = markerEl('B', '#ff9800')
-      endMarkerRef.current = new mapboxgl.Marker({ element: el })
+      endMarkerRef.current = new window.mapboxgl.Marker({ element: markerEl('B', '#ff9800') })
         .setLngLat(endPoint)
-        .setPopup(new mapboxgl.Popup({ offset: 20 }).setHTML('<b>POINT BRAVO</b><br>Objective'))
+        .setPopup(new window.mapboxgl.Popup({ offset: 20 }).setHTML('<b>POINT BRAVO</b><br>Objective'))
         .addTo(mapRef.current)
     }
   }, [endPoint, mapReady])
 
-  // ── threat polygons ───────────────────────────────────────────────────────
+  // ── threats / routes ───────────────────────────────────────────────────────
   useEffect(() => {
-    if (!mapReady || !mapRef.current) return
+    if (!mapReady) return
     mapRef.current.getSource('threats')?.setData(threats)
   }, [threats, mapReady])
 
-  // ── routes ────────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!mapReady || !mapRef.current) return
+    if (!mapReady) return
     const map = mapRef.current
     for (const id of ['route-1', 'route-2']) {
       const route = routes.find(r => r.id === id)
-      const hasRoute = !!route
-      map.getSource(id)?.setData(
-        hasRoute
-          ? { type: 'Feature', geometry: route.geometry, properties: {} }
-          : { type: 'FeatureCollection', features: [] }
+      map.getSource(id)?.setData(route
+        ? { type: 'Feature', geometry: route.geometry, properties: {} }
+        : { type: 'FeatureCollection', features: [] }
       )
-      map.setPaintProperty(`${id}-line`, 'line-opacity', hasRoute ? 0.9 : 0)
-      map.setPaintProperty(`${id}-glow`, 'line-opacity', hasRoute ? 0.25 : 0)
+      map.setPaintProperty(`${id}-line`, 'line-opacity', route ? 0.9 : 0)
+      map.setPaintProperty(`${id}-glow`, 'line-opacity', route ? 0.25 : 0)
     }
   }, [routes, mapReady])
+
+  // ── simulation: reroute when routes change mid-run ────────────────────────
+  useEffect(() => {
+    if (!simRef.current.active) return
+    const route = routesRef.current.find(r => r.id === 'route-1') || routesRef.current[0]
+    if (!route) return
+    const coords   = route.geometry.coordinates
+    const totalLen = routeTotalLen(coords)
+    // Find where the unit currently is on the new route
+    const currentPos = unitMarkerRef.current?.getLngLat()
+    if (currentPos) {
+      simRef.current.dist = nearestDist(coords, [currentPos.lng, currentPos.lat])
+    }
+    simRef.current.coords   = coords
+    simRef.current.totalLen = totalLen
+  }, [routes])
+
+  // ── simulation: start / stop ───────────────────────────────────────────────
+  useEffect(() => {
+    if (!mapReady) return
+
+    if (simulating) {
+      const route = routesRef.current.find(r => r.id === 'route-1') || routesRef.current[0]
+      if (!route) return
+      const coords   = route.geometry.coordinates
+      const totalLen = routeTotalLen(coords)
+
+      // Create unit marker
+      const el = document.createElement('div')
+      el.className = 'unit-marker'
+      const mapboxgl = window.mapboxgl
+      unitMarkerRef.current = new mapboxgl.Marker({ element: el, anchor: 'center' })
+        .setLngLat(coords[0])
+        .addTo(mapRef.current)
+
+      simRef.current = { active: true, dist: 0, totalLen, coords, lastTime: null, elapsed: 0 }
+
+      const animate = (time) => {
+        const sim = simRef.current
+        if (!sim.active) return
+
+        if (sim.lastTime === null) sim.lastTime = time
+        const dt = Math.min((time - sim.lastTime) / 1000, 0.1)
+        sim.lastTime = time
+        sim.elapsed += dt
+
+        const speed = sim.totalLen / SIMULATION_SECS
+        sim.dist = Math.min(sim.dist + speed * dt, sim.totalLen)
+
+        // Base position
+        const pos = pointAtDist(sim.coords, sim.dist)
+
+        // Wiggle: sinusoidal offset perpendicular to direction of travel
+        const dir = directionAt(sim.coords, sim.dist)
+        const dirLen = Math.sqrt(dir[0] ** 2 + dir[1] ** 2) || 1
+        const perp = [-dir[1] / dirLen, dir[0] / dirLen]
+        const wiggle = WIGGLE_AMPLITUDE * Math.sin(sim.elapsed * WIGGLE_FREQUENCY * Math.PI * 2)
+        const wiggledPos = [pos[0] + perp[0] * wiggle, pos[1] + perp[1] * wiggle]
+
+        unitMarkerRef.current?.setLngLat(wiggledPos)
+
+        if (sim.dist >= sim.totalLen) {
+          sim.active = false
+          onSimulationEnd?.()
+          return
+        }
+        rafRef.current = requestAnimationFrame(animRef.current)
+      }
+      animRef.current = animate
+      rafRef.current = requestAnimationFrame(animate)
+
+    } else {
+      // Stop
+      simRef.current.active = false
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+      unitMarkerRef.current?.remove()
+      unitMarkerRef.current = null
+    }
+
+    return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    }
+  }, [simulating, mapReady])
 
   return <div ref={containerRef} className="map-container" />
 }

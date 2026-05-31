@@ -1,24 +1,50 @@
 import { useRef, useState } from 'react'
+import exifr from 'exifr'
 
 export default function ControlPanel({
   startPoint, endPoint, placingMarker, onSetPlacing,
   threats, onToggleThreat, onRemoveThreat,
   onImageUpload, analyzing, loading, routes,
+  simulating, onStartSim, onStopSim,
 }) {
   const fileRef = useRef(null)
-  const [gpsLat,   setGpsLat]   = useState('49.2628')
-  const [gpsLng,   setGpsLng]   = useState('-123.1300')
+  const [gpsLat,    setGpsLat]    = useState('49.2628')
+  const [gpsLng,    setGpsLng]    = useState('-123.1300')
+  const [gpsSource, setGpsSource] = useState('manual')
+  const [dragOver,  setDragOver]  = useState(false)
   const [lastAnalysis, setLastAnalysis] = useState(null)
 
-  const handleFile = async (e) => {
-    const file = e.target.files[0]
-    if (!file) return
-    e.target.value = ''
-    const gpsCenter = gpsLat && gpsLng
-      ? { lat: parseFloat(gpsLat), lng: parseFloat(gpsLng) }
-      : null
-    const result = await onImageUpload(file, gpsCenter)
+  // ── shared file processor ─────────────────────────────────────────────────
+  const processFile = async (file) => {
+    if (!file?.type.startsWith('image/')) return
+
+    let lat = parseFloat(gpsLat)
+    let lng = parseFloat(gpsLng)
+    let source = 'manual'
+
+    try {
+      const gps = await exifr.gps(file)
+      if (gps?.latitude != null && gps?.longitude != null) {
+        lat = gps.latitude; lng = gps.longitude; source = 'exif'
+        setGpsLat(lat.toFixed(6))
+        setGpsLng(lng.toFixed(6))
+      }
+    } catch {}
+    setGpsSource(source)
+
+    const result = await onImageUpload(file, { lat, lng })
     if (result) setLastAnalysis({ ...result, preview: URL.createObjectURL(file) })
+  }
+
+  const handleFileInput = (e) => {
+    processFile(e.target.files[0])
+    e.target.value = ''
+  }
+
+  const handleDrop = (e) => {
+    e.preventDefault()
+    setDragOver(false)
+    processFile(e.dataTransfer.files[0])
   }
 
   const fmtCoord = (pt) => pt
@@ -29,6 +55,21 @@ export default function ControlPanel({
 
   return (
     <aside className="control-panel">
+
+      {/* ── Simulation ── */}
+      <div className="panel-section">
+        <div className="section-label">UNIT SIMULATION</div>
+        <button
+          className={`drone-btn ${simulating ? 'triggered' : ''}`}
+          onClick={simulating ? onStopSim : onStartSim}
+          disabled={routes.length === 0 || busy}
+        >
+          {simulating ? '⬛ STOP SIMULATION' : '▶ START SIMULATION'}
+        </button>
+        {simulating && (
+          <div className="sim-hint">Unit moving along Alpha route — upload a threat image to trigger reroute</div>
+        )}
+      </div>
 
       {/* ── Waypoints ── */}
       <div className="panel-section">
@@ -58,37 +99,62 @@ export default function ControlPanel({
           </button>
         </div>
         {placingMarker && (
-          <div className="placing-hint">Click anywhere on the map to set {placingMarker === 'start' ? 'Point A' : 'Point B'}</div>
+          <div className="placing-hint">
+            Click anywhere on the map to place {placingMarker === 'start' ? 'Point A' : 'Point B'}
+          </div>
         )}
       </div>
 
-      {/* ── Drone image analysis ── */}
+      {/* ── Drone image upload (drag-and-drop) ── */}
       <div className="panel-section">
         <div className="section-label">DRONE IMAGE ANALYSIS</div>
+
+        <div className="gps-header-row">
+          <span className="gps-section-label">IMAGE GPS CENTRE</span>
+          <span className={`gps-source-badge ${gpsSource}`}>
+            {gpsSource === 'exif' ? '⊕ AUTO (EXIF)' : '✎ MANUAL'}
+          </span>
+        </div>
         <div className="gps-row">
           <div className="gps-field">
             <span className="gps-label">LAT</span>
             <input className="gps-input" value={gpsLat}
-              onChange={e => setGpsLat(e.target.value)} placeholder="49.2628" />
+              onChange={e => { setGpsLat(e.target.value); setGpsSource('manual') }}
+              placeholder="49.2628" />
           </div>
           <div className="gps-field">
             <span className="gps-label">LNG</span>
             <input className="gps-input" value={gpsLng}
-              onChange={e => setGpsLng(e.target.value)} placeholder="-123.1300" />
+              onChange={e => { setGpsLng(e.target.value); setGpsSource('manual') }}
+              placeholder="-123.1300" />
           </div>
         </div>
 
-        <input ref={fileRef} type="file" accept="image/*"
-          style={{ display: 'none' }} onChange={handleFile} />
-        <button
-          className={`drone-btn ${analyzing ? 'loading' : ''}`}
-          onClick={() => fileRef.current?.click()}
-          disabled={busy}
+        {/* Drop zone wraps the button */}
+        <div
+          className={`upload-zone ${dragOver ? 'drag-over' : ''}`}
+          onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+          onDragEnter={e => { e.preventDefault(); setDragOver(true) }}
+          onDragLeave={() => setDragOver(false)}
+          onDrop={handleDrop}
         >
-          {analyzing
-            ? <><span className="spinner" /> AI ANALYZING IMAGE…</>
-            : '▲ UPLOAD DRONE IMAGE'}
-        </button>
+          <input ref={fileRef} type="file" accept="image/*"
+            style={{ display: 'none' }} onChange={handleFileInput} />
+          <button
+            className={`drone-btn ${analyzing ? 'loading' : ''}`}
+            onClick={() => fileRef.current?.click()}
+            disabled={busy}
+          >
+            {analyzing
+              ? <><span className="spinner" /> AI ANALYZING IMAGE…</>
+              : dragOver
+                ? '⊕ DROP IMAGE HERE'
+                : '▲ UPLOAD / DROP DRONE IMAGE'}
+          </button>
+          {!analyzing && (
+            <div className="drop-hint">or drag & drop an image anywhere here</div>
+          )}
+        </div>
 
         {lastAnalysis && (
           <div className="image-preview">
@@ -117,24 +183,16 @@ export default function ControlPanel({
                   <span className="threat-dot" />
                   <div className="threat-info">
                     <div className="threat-label">{t.label}</div>
-                    {t.riskLevel && (
-                      <div className="threat-risk">RISK {t.riskLevel}/5</div>
-                    )}
+                    {t.riskLevel && <div className="threat-risk">RISK {t.riskLevel}/5</div>}
                   </div>
                 </div>
                 <div className="threat-actions">
-                  <button
-                    className={`threat-toggle ${t.visible ? 'on' : 'off'}`}
-                    onClick={() => onToggleThreat(t.id)}
-                    title={t.visible ? 'Hide' : 'Show'}
-                  >
+                  <button className={`threat-toggle ${t.visible ? 'on' : 'off'}`}
+                    onClick={() => onToggleThreat(t.id)} title={t.visible ? 'Hide' : 'Show'}>
                     {t.visible ? '◉' : '○'}
                   </button>
-                  <button
-                    className="threat-remove"
-                    onClick={() => onRemoveThreat(t.id)}
-                    title="Remove"
-                  >
+                  <button className="threat-remove"
+                    onClick={() => onRemoveThreat(t.id)} title="Remove">
                     ✕
                   </button>
                 </div>

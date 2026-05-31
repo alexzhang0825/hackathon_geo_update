@@ -4,8 +4,8 @@ import ControlPanel from './components/ControlPanel'
 
 const MAPBOX_TOKEN = import.meta.env.VITE_MAPBOX_TOKEN
 
-const DEFAULT_START = [-123.1380, 49.2520]  // Marpole
-const DEFAULT_END   = [-123.1050, 49.2750]  // Olympic Village
+const DEFAULT_START = [-123.1380, 49.2520]
+const DEFAULT_END   = [-123.1050, 49.2750]
 
 const FALLBACK_ROUTES = [
   {
@@ -51,15 +51,15 @@ async function fetchRoutesFromAPI(start, end, threats, setRoutes, setLoading) {
 }
 
 export default function App() {
-  const [startPoint,     setStartPoint]     = useState(DEFAULT_START)
-  const [endPoint,       setEndPoint]       = useState(DEFAULT_END)
-  const [placingMarker,  setPlacingMarker]  = useState(null) // 'start' | 'end' | null
-  const [threats,        setThreats]        = useState([])
-  const [routes,         setRoutes]         = useState([])
-  const [loading,        setLoading]        = useState(false)
-  const [analyzing,      setAnalyzing]      = useState(false)
+  const [startPoint,    setStartPoint]    = useState(DEFAULT_START)
+  const [endPoint,      setEndPoint]      = useState(DEFAULT_END)
+  const [placingMarker, setPlacingMarker] = useState(null)
+  const [threats,       setThreats]       = useState([])
+  const [routes,        setRoutes]        = useState([])
+  const [loading,       setLoading]       = useState(false)
+  const [analyzing,     setAnalyzing]     = useState(false)
+  const [simulating,    setSimulating]    = useState(false)
 
-  // Ref so the stable map-click handler always sees the current placing mode
   const placingRef = useRef(null)
 
   const setPlacing = (mode) => {
@@ -70,11 +70,9 @@ export default function App() {
   const doFetch = (start, end, threatList) =>
     fetchRoutesFromAPI(start, end, threatList, setRoutes, setLoading)
 
-  // Initial route on mount
   useEffect(() => { doFetch(DEFAULT_START, DEFAULT_END, []) }, [])
 
-  // ── map interaction ────────────────────────────────────────────────────────
-
+  // ── map click ─────────────────────────────────────────────────────────────
   const handleMapClick = ([lng, lat]) => {
     const mode = placingRef.current
     if (!mode) return
@@ -88,8 +86,7 @@ export default function App() {
     setPlacing(null)
   }
 
-  // ── threat management ──────────────────────────────────────────────────────
-
+  // ── threats ───────────────────────────────────────────────────────────────
   const handleToggleThreat = (id) => {
     const updated = threats.map(t => t.id === id ? { ...t, visible: !t.visible } : t)
     setThreats(updated)
@@ -102,8 +99,7 @@ export default function App() {
     doFetch(startPoint, endPoint, updated)
   }
 
-  // ── image upload → Gemini → new threat ────────────────────────────────────
-
+  // ── image upload ──────────────────────────────────────────────────────────
   const handleImageUpload = async (file, gpsCenter) => {
     if (analyzing) return
     setAnalyzing(true)
@@ -129,14 +125,12 @@ export default function App() {
           riskLevel:   data.risk_level,
           geojson:     data.obstacle_geojson,
           visible:     true,
-          preview:     URL.createObjectURL(file),
           analysis:    data,
         }
         const updated = [...threats, newThreat]
         setThreats(updated)
         doFetch(startPoint, endPoint, updated)
       }
-      // If no threat detected, image analysis result is shown in the panel (no route change)
       return data
     } catch (e) {
       console.warn('Image analysis failed', e)
@@ -146,8 +140,10 @@ export default function App() {
     }
   }
 
-  // ── derived ────────────────────────────────────────────────────────────────
+  // ── simulation ────────────────────────────────────────────────────────────
+  const handleSimulationEnd = () => setSimulating(false)
 
+  // ── derived ───────────────────────────────────────────────────────────────
   const threatCollection = {
     type: 'FeatureCollection',
     features: threats.filter(t => t.visible).map(t => t.geojson),
@@ -161,7 +157,7 @@ export default function App() {
         <span className="top-bar-title">TACTICAL ROUTE PLANNER</span>
         <span className="top-bar-coords">49.2628°N 123.1300°W — VANCOUVER</span>
         <span className={`top-bar-status ${analyzing ? 'analyzing' : hasObstacles ? 'danger' : 'safe'}`}>
-          {analyzing ? '⬤ AI ANALYZING…' : hasObstacles ? '⬤ THREATS ACTIVE' : '⬤ ALL CLEAR'}
+          {analyzing ? '⬤ AI ANALYZING…' : simulating ? '⬤ UNIT IN TRANSIT' : hasObstacles ? '⬤ THREATS ACTIVE' : '⬤ ALL CLEAR'}
         </span>
       </header>
 
@@ -173,6 +169,8 @@ export default function App() {
           onMapClick={handleMapClick}
           threats={threatCollection}
           routes={routes}
+          simulating={simulating}
+          onSimulationEnd={handleSimulationEnd}
           mapboxToken={MAPBOX_TOKEN}
         />
         <ControlPanel
@@ -187,6 +185,9 @@ export default function App() {
           analyzing={analyzing}
           loading={loading}
           routes={routes}
+          simulating={simulating}
+          onStartSim={() => setSimulating(true)}
+          onStopSim={() => setSimulating(false)}
         />
       </div>
     </div>
