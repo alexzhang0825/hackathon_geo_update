@@ -1,139 +1,166 @@
 import { useRef, useState } from 'react'
 
 export default function ControlPanel({
-  onDroneTrigger, onImageUpload, onReset,
-  loading, analyzing, obstacleVisible, aiAnalysis,
-  troopSize, setTroopSize, threatLevel, setThreatLevel,
-  routes
+  startPoint, endPoint, placingMarker, onSetPlacing,
+  threats, onToggleThreat, onRemoveThreat,
+  onImageUpload, analyzing, loading, routes,
 }) {
   const fileRef = useRef(null)
-  // Pre-filled with real EXIF GPS from drone photo (Samsung SM-A520W)
-  const [gpsLat, setGpsLat] = useState('49.2628')
-  const [gpsLng, setGpsLng] = useState('-123.1300')
-  const [preview, setPreview] = useState(null)
+  const [gpsLat,   setGpsLat]   = useState('49.2628')
+  const [gpsLng,   setGpsLng]   = useState('-123.1300')
+  const [lastAnalysis, setLastAnalysis] = useState(null)
 
-  const threatLabels = ['', 'LOW', 'GUARDED', 'ELEVATED', 'HIGH', 'CRITICAL']
-  const threatColors = ['', '#4caf50', '#8bc34a', '#ff9800', '#ff5722', '#f44336']
-
-  const handleFile = (e) => {
+  const handleFile = async (e) => {
     const file = e.target.files[0]
     if (!file) return
-    setPreview(URL.createObjectURL(file))
+    e.target.value = ''
     const gpsCenter = gpsLat && gpsLng
       ? { lat: parseFloat(gpsLat), lng: parseFloat(gpsLng) }
       : null
-    onImageUpload(file, gpsCenter)
+    const result = await onImageUpload(file, gpsCenter)
+    if (result) setLastAnalysis({ ...result, preview: URL.createObjectURL(file) })
   }
+
+  const fmtCoord = (pt) => pt
+    ? `${Math.abs(pt[1]).toFixed(4)}°${pt[1] >= 0 ? 'N' : 'S'}  ${Math.abs(pt[0]).toFixed(4)}°${pt[0] >= 0 ? 'E' : 'W'}`
+    : 'Not set'
 
   const busy = loading || analyzing
 
   return (
     <aside className="control-panel">
 
-      {/* ── AI Image Analysis ── */}
+      {/* ── Waypoints ── */}
+      <div className="panel-section">
+        <div className="section-label">WAYPOINTS</div>
+        <div className="waypoint-row">
+          <div className="waypoint-info">
+            <span className="waypoint-dot" style={{ background: '#00e5ff' }}>A</span>
+            <span className="waypoint-coord">{fmtCoord(startPoint)}</span>
+          </div>
+          <button
+            className={`waypoint-btn ${placingMarker === 'start' ? 'active' : ''}`}
+            onClick={() => onSetPlacing(placingMarker === 'start' ? null : 'start')}
+          >
+            {placingMarker === 'start' ? 'CLICK MAP…' : 'MOVE'}
+          </button>
+        </div>
+        <div className="waypoint-row">
+          <div className="waypoint-info">
+            <span className="waypoint-dot" style={{ background: '#ff9800' }}>B</span>
+            <span className="waypoint-coord">{fmtCoord(endPoint)}</span>
+          </div>
+          <button
+            className={`waypoint-btn ${placingMarker === 'end' ? 'active' : ''}`}
+            onClick={() => onSetPlacing(placingMarker === 'end' ? null : 'end')}
+          >
+            {placingMarker === 'end' ? 'CLICK MAP…' : 'MOVE'}
+          </button>
+        </div>
+        {placingMarker && (
+          <div className="placing-hint">Click anywhere on the map to set {placingMarker === 'start' ? 'Point A' : 'Point B'}</div>
+        )}
+      </div>
+
+      {/* ── Drone image analysis ── */}
       <div className="panel-section">
         <div className="section-label">DRONE IMAGE ANALYSIS</div>
-
         <div className="gps-row">
           <div className="gps-field">
             <span className="gps-label">LAT</span>
             <input className="gps-input" value={gpsLat}
-              onChange={e => setGpsLat(e.target.value)} placeholder="49.2792" />
+              onChange={e => setGpsLat(e.target.value)} placeholder="49.2628" />
           </div>
           <div className="gps-field">
             <span className="gps-label">LNG</span>
             <input className="gps-input" value={gpsLng}
-              onChange={e => setGpsLng(e.target.value)} placeholder="-123.1087" />
+              onChange={e => setGpsLng(e.target.value)} placeholder="-123.1300" />
           </div>
         </div>
 
         <input ref={fileRef} type="file" accept="image/*"
           style={{ display: 'none' }} onChange={handleFile} />
-
         <button
           className={`drone-btn ${analyzing ? 'loading' : ''}`}
           onClick={() => fileRef.current?.click()}
-          disabled={busy || obstacleVisible}
+          disabled={busy}
         >
           {analyzing
             ? <><span className="spinner" /> AI ANALYZING IMAGE…</>
             : '▲ UPLOAD DRONE IMAGE'}
         </button>
 
-        {preview && (
+        {lastAnalysis && (
           <div className="image-preview">
-            <img src={preview} alt="drone" />
-            {aiAnalysis && (
-              <div className={`ai-result risk-${aiAnalysis.risk_level || 0}`}>
-                <div className="ai-threat-type">{aiAnalysis.threat_type || 'ANALYSIS COMPLETE'}</div>
-                <div className="ai-desc">{aiAnalysis.threat_description}</div>
-                {aiAnalysis.risk_level && (
-                  <div className="ai-risk">RISK LEVEL: {aiAnalysis.risk_level}/5</div>
-                )}
-              </div>
-            )}
+            {lastAnalysis.preview && <img src={lastAnalysis.preview} alt="drone" />}
+            <div className={`ai-result risk-${lastAnalysis.risk_level || 0}`}>
+              <div className="ai-threat-type">{lastAnalysis.threat_type || 'ANALYSIS COMPLETE'}</div>
+              <div className="ai-desc">{lastAnalysis.threat_description}</div>
+              {lastAnalysis.risk_level && (
+                <div className="ai-risk">RISK LEVEL: {lastAnalysis.risk_level}/5</div>
+              )}
+            </div>
           </div>
         )}
       </div>
 
-      {/* ── Manual trigger ── */}
+      {/* ── Threat zones ── */}
       <div className="panel-section">
-        <div className="section-label">MANUAL TRIGGER</div>
-        {!obstacleVisible ? (
-          <button className="drone-btn" onClick={onDroneTrigger} disabled={busy}>
-            ▶ SIMULATE OBSTACLE
-          </button>
+        <div className="section-label">THREAT ZONES</div>
+        {threats.length === 0 ? (
+          <div className="no-routes">No threats detected yet</div>
         ) : (
-          <button className="drone-btn triggered" onClick={onReset}>
-            ↺ RESET MISSION
-          </button>
+          <div className="threat-list">
+            {threats.map(t => (
+              <div key={t.id} className={`threat-item ${t.visible ? '' : 'threat-hidden'}`}>
+                <div className="threat-item-main">
+                  <span className="threat-dot" />
+                  <div className="threat-info">
+                    <div className="threat-label">{t.label}</div>
+                    {t.riskLevel && (
+                      <div className="threat-risk">RISK {t.riskLevel}/5</div>
+                    )}
+                  </div>
+                </div>
+                <div className="threat-actions">
+                  <button
+                    className={`threat-toggle ${t.visible ? 'on' : 'off'}`}
+                    onClick={() => onToggleThreat(t.id)}
+                    title={t.visible ? 'Hide' : 'Show'}
+                  >
+                    {t.visible ? '◉' : '○'}
+                  </button>
+                  <button
+                    className="threat-remove"
+                    onClick={() => onRemoveThreat(t.id)}
+                    title="Remove"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
         )}
-      </div>
-
-      {/* ── Parameters ── */}
-      <div className="panel-section">
-        <div className="section-label">PARAMETERS</div>
-
-        <div className="param-group">
-          <div className="param-header">
-            <span>TROOP SIZE</span>
-            <span className="param-value">{troopSize}</span>
-          </div>
-          <input type="range" min="1" max="100" value={troopSize}
-            onChange={e => setTroopSize(+e.target.value)} className="tactical-slider" />
-          <div className="param-hints"><span>LIGHT</span><span>HEAVY</span></div>
-        </div>
-
-        <div className="param-group">
-          <div className="param-header">
-            <span>THREAT LEVEL</span>
-            <span className="param-value" style={{ color: threatColors[threatLevel] }}>
-              {threatLabels[threatLevel]}
-            </span>
-          </div>
-          <input type="range" min="1" max="5" value={threatLevel}
-            onChange={e => setThreatLevel(+e.target.value)}
-            className="tactical-slider threat"
-            style={{ '--thumb-color': threatColors[threatLevel] }} />
-          <div className="param-hints">
-            <span>1</span><span>2</span><span>3</span><span>4</span><span>5</span>
-          </div>
-        </div>
       </div>
 
       {/* ── Routes ── */}
       <div className="panel-section">
         <div className="section-label">ROUTES</div>
-        {routes.length === 0
-          ? <div className="no-routes">Awaiting obstacle data…</div>
-          : routes.map(r => <RouteCard key={r.id} route={r} />)
-        }
+        {loading ? (
+          <div className="no-routes"><span className="spinner" /> Calculating…</div>
+        ) : routes.length === 0 ? (
+          <div className="no-routes">Set waypoints to generate routes</div>
+        ) : (
+          routes.map(r => <RouteCard key={r.id} route={r} />)
+        )}
       </div>
 
-      {/* ── Legend ── */}
       <div className="panel-footer">
-        {[['#888', 'Original route'], ['#00e5ff', 'Alpha route'],
-          ['#ff9800', 'Bravo route'], ['#f44336', 'Obstacle / threat zone']
+        {[
+          ['#00e5ff', 'Alpha route (shortest)'],
+          ['#ff9800', 'Bravo route (alternative)'],
+          ['#f44336', 'Threat zone'],
         ].map(([color, label]) => (
           <div key={label} className="legend-row">
             <span className="legend-dot" style={{ background: color }} />
@@ -146,33 +173,18 @@ export default function ControlPanel({
 }
 
 function RouteCard({ route }) {
-  const scoreClass = route.score >= 40 ? 'high' : route.score >= 20 ? 'med' : 'low'
   const color = route.id === 'route-1' ? '#00e5ff' : '#ff9800'
   return (
-    <div className={`route-card ${route.visible ? 'active' : 'rejected'}`}
-      style={{ '--route-color': color }}>
+    <div className="route-card active" style={{ '--route-color': color }}>
       <div className="route-card-header">
         <span className="route-name" style={{ color }}>{route.label}</span>
-        {!route.visible && <span className="rejected-badge">REJECTED</span>}
       </div>
       <div className="route-card-stats">
         <div className="stat">
           <div className="stat-label">DISTANCE</div>
           <div className="stat-value">{(route.length_m / 1000).toFixed(2)} km</div>
         </div>
-        <div className="stat">
-          <div className="stat-label">SCORE</div>
-          <div className={`stat-value score-${scoreClass}`}>
-            {route.visible ? route.score : '—'}
-          </div>
-        </div>
       </div>
-      {route.visible && (
-        <div className="score-bar-track">
-          <div className="score-bar-fill"
-            style={{ width: `${Math.min(100, route.score)}%`, background: color }} />
-        </div>
-      )}
     </div>
   )
 }

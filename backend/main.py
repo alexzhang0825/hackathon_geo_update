@@ -5,6 +5,7 @@ from pydantic import BaseModel
 import osmnx as ox
 import networkx as nx
 from shapely.geometry import shape, LineString
+from shapely.ops import unary_union
 from dotenv import load_dotenv
 import logging
 import os
@@ -15,25 +16,18 @@ from analyze import analyze as gemini_analyze
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Demo: Vancouver — Marpole → Olympic Village
-# Route passes through real GPS photo location (49.2628, -123.1300)
-START_LNG, START_LAT = -123.1380, 49.2520   # Marpole / south Vancouver
-END_LNG,   END_LAT   = -123.1050, 49.2750   # Olympic Village / False Creek
-CENTER = (49.2635, -123.1215)               # centered on real photo GPS
+# Vancouver area graph — loaded once, start/end nodes resolved per request
+CENTER = (49.2635, -123.1215)
 
 G = None
-start_node = None
-end_node = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global G, start_node, end_node
+    global G
     logger.info("Loading OSM graph for Vancouver…")
     try:
-        G = ox.graph_from_point(CENTER, dist=1800, network_type="drive")
-        start_node = ox.nearest_nodes(G, X=START_LNG, Y=START_LAT)
-        end_node   = ox.nearest_nodes(G, X=END_LNG,   Y=END_LAT)
+        G = ox.graph_from_point(CENTER, dist=2500, network_type="drive")
         logger.info(f"Graph loaded: {len(G.nodes)} nodes, {len(G.edges)} edges")
     except Exception as e:
         logger.error(f"Graph load failed: {e}")
@@ -50,14 +44,15 @@ app.add_middleware(
 )
 
 
+# ── helpers ───────────────────────────────────────────────────────────────────
+
 def nodes_to_coords(graph, path):
     return [[graph.nodes[n]["x"], graph.nodes[n]["y"]] for n in path]
 
 def route_length_m(graph, path):
     total = 0.0
     for u, v in zip(path, path[1:]):
-        edges = graph[u][v]
-        total += min(d.get("length", 0) for d in edges.values())
+        total += min(d.get("length", 0) for d in graph[u][v].values())
     return round(total, 1)
 
 def blocked_edges(graph, poly_shape):
@@ -72,6 +67,8 @@ def blocked_edges(graph, poly_shape):
     return result
 
 
+# ── schemas ───────────────────────────────────────────────────────────────────
+
 class Geometry(BaseModel):
     type: str
     coordinates: list
@@ -82,93 +79,76 @@ class Feature(BaseModel):
     properties: dict = {}
 
 class RouteRequest(BaseModel):
-    obstacle: Feature
+    start_lng: float
+    start_lat: float
+    end_lng: float
+    end_lat: float
+    obstacles: list[Feature] = []
 
+
+# ── endpoints ─────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "graph_loaded": G is not None}
 
 
-@app.post("/api/analyze-image")
-async def analyze_image(
-    image: UploadFile = File(...),
-    gps_lat: float = Form(49.2792),
-    gps_lng: float = Form(-123.1087),
-):
-    image_bytes = await image.read()
-    result = gemini_analyze(image_bytes, gps_lat, gps_lng)
-    logger.info(f"AI analysis: threat={result.get('threat_detected')} risk={result.get('risk_level')}")
-    return result
-
-
-@app.get("/api/baseline")
-async def get_baseline():
-    if G is None:
-        return {"route": FALLBACK_BASELINE, "start": [START_LNG, START_LAT], "end": [END_LNG, END_LAT]}
-    try:
-        path = nx.shortest_path(G, start_node, end_node, weight="length")
-        return {
-            "route": {
-                "type": "Feature",
-                "geometry": {"type": "LineString", "coordinates": nodes_to_coords(G, path)},
-                "properties": {"length_m": route_length_m(G, path)}
-            },
-            "start": [START_LNG, START_LAT],
-            "end":   [END_LNG, END_LAT]
-        }
-    except Exception as e:
-        logger.error(f"Baseline error: {e}")
-        return {"route": FALLBACK_BASELINE, "start": [START_LNG, START_LAT], "end": [END_LNG, END_LAT]}
-
-
-@app.post("/api/routes")
-async def get_routes(req: RouteRequest):
+@app.post("/api/route")
+async def get_route(req: RouteRequest):
+    """
+    Compute two routes between user-selected start/end, avoiding all provided
+    obstacle polygons. Start/end nodes are resolved dynamically via nearest_nodes.
+    """
     if G is None:
         return {"routes": FALLBACK_ROUTES}
     try:
-        poly = shape(req.obstacle.geometry.model_dump())
+        s_node = ox.nearest_nodes(G, X=req.start_lng, Y=req.start_lat)
+        e_node = ox.nearest_nodes(G, X=req.end_lng,   Y=req.end_lat)
+
         G2 = G.copy()
-        removed = blocked_edges(G2, poly)
-        G2.remove_edges_from(removed)
-        logger.info(f"Removed {len(removed)} edges intersecting obstacle")
+
+        if req.obstacles:
+            polys   = [shape(f.geometry.model_dump()) for f in req.obstacles]
+            merged  = unary_union(polys)
+            removed = blocked_edges(G2, merged)
+            G2.remove_edges_from(removed)
+            logger.info(f"Blocked {len(removed)} edges from {len(req.obstacles)} obstacle(s)")
 
         routes = []
 
+        # ── shortest path ─────────────────────────────────────────────────────
         try:
-            p1 = nx.shortest_path(G2, start_node, end_node, weight="length")
+            p1 = nx.shortest_path(G2, s_node, e_node, weight="length")
             routes.append({
                 "id": "route-1", "label": "ALPHA ROUTE",
                 "geometry": {"type": "LineString", "coordinates": nodes_to_coords(G2, p1)},
-                "length_m": route_length_m(G2, p1)
+                "length_m": route_length_m(G2, p1),
             })
         except nx.NetworkXNoPath:
             routes.append(FALLBACK_ROUTES[0])
 
+        # ── alternative path (penalise route-1 edges) ────────────────────────
         try:
-            G3 = G2.copy()
-            p1_ref = nx.shortest_path(G3, start_node, end_node, weight="length")
-            for u, v in zip(p1_ref, p1_ref[1:]):
+            G3    = G2.copy()
+            p1ref = nx.shortest_path(G3, s_node, e_node, weight="length")
+            for u, v in zip(p1ref, p1ref[1:]):
                 if G3.has_edge(u, v):
                     for k in G3[u][v]:
                         G3[u][v][k]["length"] = G3[u][v][k].get("length", 1) * 4
-            p2 = nx.shortest_path(G3, start_node, end_node, weight="length")
-            if p2 == p1_ref:
-                for u, v in zip(p1_ref, p1_ref[1:]):
+            p2 = nx.shortest_path(G3, s_node, e_node, weight="length")
+            if p2 == p1ref:
+                for u, v in zip(p1ref, p1ref[1:]):
                     if G3.has_edge(u, v):
                         for k in G3[u][v]:
                             G3[u][v][k]["length"] = G3[u][v][k].get("length", 1) * 10
-                p2 = nx.shortest_path(G3, start_node, end_node, weight="length")
+                p2 = nx.shortest_path(G3, s_node, e_node, weight="length")
             routes.append({
                 "id": "route-2", "label": "BRAVO ROUTE",
                 "geometry": {"type": "LineString", "coordinates": nodes_to_coords(G2, p2)},
-                "length_m": route_length_m(G2, p2)
+                "length_m": route_length_m(G2, p2),
             })
         except nx.NetworkXNoPath:
             routes.append(FALLBACK_ROUTES[1])
-
-        while len(routes) < 2:
-            routes.append(FALLBACK_ROUTES[len(routes)])
 
         return {"routes": routes[:2]}
 
@@ -177,39 +157,35 @@ async def get_routes(req: RouteRequest):
         return {"routes": FALLBACK_ROUTES}
 
 
-FALLBACK_BASELINE = {
-    "type": "Feature",
-    "geometry": {
-        "type": "LineString",
-        "coordinates": [
-            [-123.1380, 49.2520], [-123.1340, 49.2555], [-123.1300, 49.2628],
-            [-123.1220, 49.2670], [-123.1130, 49.2710], [-123.1050, 49.2750]
-        ]
-    },
-    "properties": {"length_m": 2600.0}
-}
+@app.post("/api/analyze-image")
+async def analyze_image(
+    image: UploadFile = File(...),
+    gps_lat: float = Form(49.2628),
+    gps_lng: float = Form(-123.1300),
+):
+    image_bytes = await image.read()
+    result = gemini_analyze(image_bytes, gps_lat, gps_lng)
+    logger.info(f"AI analysis: threat={result.get('threat_detected')} risk={result.get('risk_level')}")
+    return result
+
+
+# ── fallback data ─────────────────────────────────────────────────────────────
 
 FALLBACK_ROUTES = [
     {
         "id": "route-1", "label": "ALPHA ROUTE",
-        "geometry": {
-            "type": "LineString",
-            "coordinates": [
-                [-123.1380, 49.2520], [-123.1360, 49.2540], [-123.1350, 49.2600],
-                [-123.1240, 49.2680], [-123.1130, 49.2720], [-123.1050, 49.2750]
-            ]
-        },
-        "length_m": 2750.0
+        "geometry": {"type": "LineString", "coordinates": [
+            [-123.1380, 49.2520], [-123.1360, 49.2540], [-123.1350, 49.2600],
+            [-123.1240, 49.2680], [-123.1130, 49.2720], [-123.1050, 49.2750],
+        ]},
+        "length_m": 2750.0,
     },
     {
         "id": "route-2", "label": "BRAVO ROUTE",
-        "geometry": {
-            "type": "LineString",
-            "coordinates": [
-                [-123.1380, 49.2520], [-123.1400, 49.2580], [-123.1350, 49.2650],
-                [-123.1200, 49.2700], [-123.1050, 49.2750]
-            ]
-        },
-        "length_m": 3050.0
-    }
+        "geometry": {"type": "LineString", "coordinates": [
+            [-123.1380, 49.2520], [-123.1400, 49.2580], [-123.1350, 49.2650],
+            [-123.1200, 49.2700], [-123.1050, 49.2750],
+        ]},
+        "length_m": 3050.0,
+    },
 ]
