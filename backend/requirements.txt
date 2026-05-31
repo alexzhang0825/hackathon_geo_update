@@ -4,7 +4,7 @@ osmnx
 networkx
 shapely
 pydantic
-google-generativeai
+anthropic
 Pillow
 python-multipart
 python-dotenv
